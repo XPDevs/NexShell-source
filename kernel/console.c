@@ -26,11 +26,27 @@ struct console console_root = {0};
 static struct graphics_color bgcolor = { 0, 0, 0 };
 static struct graphics_color fgcolor = { 255, 255, 255 };
 
+// New boot message function
+void bootmsg(struct console *c) {
+        console_putstring(c, "\f\n");
+	console_putstring(c, "NexShell is starting up!\n");
+    __asm__ __volatile__ (
+        "mov $400000000, %%ecx\n"
+        "1:\n"
+        "dec %%ecx\n"
+        "jnz 1b\n"
+        :
+        :
+        : "ecx"
+    );
+}
+
 struct console * console_create_root()
 {
 	console_root.window = window_create_root();
 	console_root.gx = window_graphics(console_root.window);
 	console_reset(&console_root);
+	bootmsg(&console_root);
 	console_putstring(&console_root,"\nconsole: initialized\n");
 	return &console_root;
 }
@@ -114,14 +130,12 @@ int console_write( struct console *d, const char *data, int size )
 			d->ypos++;
 		}
 
-		if(d->ypos >= d->ysize) {
-			d->xpos = d->ypos = 0;
-			d->xsize = graphics_width(d->gx) / 8;
-			d->ysize = graphics_height(d->gx) / 8;
-			graphics_fgcolor(d->gx, fgcolor);
-			graphics_bgcolor(d->gx, bgcolor);
-			graphics_clear(d->gx, 0, 0, graphics_width(d->gx), graphics_height(d->gx));
-		}
+if (d->ypos >= d->ysize) {
+	graphics_clear(d->gx, 0, 0, graphics_width(d->gx), graphics_height(d->gx));
+	d->xpos = 0;
+	d->ypos = 0;
+}
+
 
 	}
 	graphics_char(d->gx, d->xpos * 8, d->ypos * 8, '_');
@@ -214,4 +228,3 @@ void console_size( struct console *c, int *xsize, int *ysize )
 	*xsize = c->xsize;
 	*ysize = c->ysize;
 }
-
