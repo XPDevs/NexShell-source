@@ -7,7 +7,7 @@ USER_PROGRAMS=$(USER_SOURCES:c=exe)
 KERNEL_SOURCES=$(wildcard kernel/*.[chS])
 WORDS=/usr/share/dict/words
 
-.PHONY: build-kernel build-library build-userspace build-cdrom-image
+.PHONY: clean build-kernel build-library build-userspace build-cdrom-image 
 
 all: build-cdrom-image
 
@@ -21,6 +21,7 @@ build-cdrom-image: basekernel.iso
 
 kernel/basekernel.img: $(KERNEL_SOURCES) $(LIBRARY_HEADERS)
 	cd kernel && make
+	cp kernel/basekernel.img ../NexShell.krn
 
 library/baselib.a: $(LIBRARY_SOURCES) $(LIBRARY_HEADERS)
 	cd library && make
