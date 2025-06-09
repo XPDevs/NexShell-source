@@ -2,6 +2,10 @@
 Copyright (C) 2016-2019 The University of Notre Dame
 This software is distributed under the GNU General Public License.
 See the file LICENSE for details.
+
+All modifiactions are copyrighted to XPDevs and James Turner
+XPDevs and James Turner use basekernel as a base where mods are added and updated
+for the NexShell kernel
 */
 
 #include "kernel/types.h"
@@ -21,6 +25,16 @@ See the file LICENSE for details.
 #include "kernelcore.h"
 #include "bcache.h"
 #include "printf.h"
+#include "graphics.h" // Include your graphics header
+
+// define the start screen for when the gui starts
+#define COLOR_BLUE  0x0000FF      // RGB hex for blue (blue channel max)
+#define COLOR_WHITE 0xFFFFFF      // White color
+
+// DO NOT TOUCH THESE
+#define PM1a_CNT_BLK 0xB004      // Example ACPI PM1a control port (adjust per your ACPI)
+#define SLP_TYP1    (0x5 << 10)  // Sleep type 1 for shutdown (example value)
+#define SLP_EN      (1 << 13)
 
 static int kshell_mount( const char *devname, int unit, const char *fs_type)
 {
@@ -61,67 +75,6 @@ static int kshell_mount( const char *devname, int unit, const char *fs_type)
 	return -1;
 }
 
-static int kshell_automount()
-{
-	int i;
-
-	for(i=0;i<4;i++) {
-		printf("automount: trying atapi unit %d...\n",i);
-		if(kshell_mount("atapi",i,"cdromfs")==0) return 0;
-	}
-
-	for(i=0;i<4;i++) {
-		printf("automount: trying ata unit %d...\n",i);
-		if(kshell_mount("ata",i,"simplefs")==0) return 0;
-	}
-
-	printf("automount: no bootable devices available.\n");
-	return -1;
-}
-
-/*
-Install software from the cdrom volume unit src
-to the disk volume dst by performing a recursive copy.
-XXX This needs better error checking.
-*/
-
-int kshell_install( const char *src_device_name, int src_unit, const char *dst_device_name, int dst_unit )
-{
-	struct fs *srcfs = fs_lookup("cdromfs");
-	struct fs *dstfs = fs_lookup("diskfs");
-
-	if(!srcfs || !dstfs) return KERROR_NOT_FOUND;
-
-	struct device *srcdev = device_open(src_device_name,src_unit);
-	struct device *dstdev = device_open(dst_device_name,dst_unit);
-
-	if(!srcdev || !dstdev) return KERROR_NOT_FOUND;
-
-	struct fs_volume *srcvolume = fs_volume_open(srcfs,srcdev);
-	struct fs_volume *dstvolume = fs_volume_open(dstfs,dstdev);
-
-	if(!srcvolume || !dstvolume) return KERROR_NOT_FOUND;
-
-	struct fs_dirent *srcroot = fs_volume_root(srcvolume);
-	struct fs_dirent *dstroot = fs_volume_root(dstvolume);
-
-	printf("copying %s unit %d to %s unit %d...\n",src_device_name,src_unit,dst_device_name,dst_unit);
-
-	fs_dirent_copy(srcroot, dstroot,0);
-
-	fs_dirent_close(dstroot);
-	fs_dirent_close(srcroot);
-
-	fs_volume_close(srcvolume);
-	fs_volume_close(dstvolume);
-
-	device_close(srcdev);
-
-	bcache_flush_device(dstdev);
-	device_close(dstdev);
-
-	return 0;
-}
 
 static int kshell_printdir(const char *d, int length)
 {
@@ -158,120 +111,170 @@ static int kshell_listdir(const char *path)
 
 static int kshell_execute(int argc, const char **argv)
 {
-	const char *cmd = argv[0];
+    if (argc < 1) {
+        printf("No command provided.\n");
+        return -1;
+    }
 
-	if(!strcmp(cmd, "start")) {
-		if(argc > 1) {
-			int fd = sys_open_file(KNO_STDDIR,argv[1],0,0);
-			if(fd>=0) {
-				int pid = sys_process_run(fd, argc - 1,  &argv[1]);
-				if(pid > 0) {
-					printf("started process %d\n", pid);
-					process_yield();
-				} else {
-					printf("couldn't start %s\n", argv[1]);
-				}
-				sys_object_close(fd);
-			} else {
-				printf("couldn't find %s\n",argv[1]);
-			}
-		} else {
-			printf("run: requires argument.\n");
-		}
-	} else if(!strcmp(cmd, "exec")) {
-		if(argc > 1) {
-			int fd = sys_open_file(KNO_STDDIR,argv[1],0,0);
-			if(fd>=0) {
-				sys_process_exec(fd, argc - 1, &argv[1]);
-				process_yield();
-				printf("couldn't exec %s\n", argv[1]);
-			} else {
-				printf("couldn't find %s\n",argv[1]);
-			}
-		} else {
-			printf("exec: requires argument.\n");
-		}
-	} else if(!strcmp(cmd, "run")) {
-		if(argc > 1) {
-			int fd = sys_open_file(KNO_STDDIR,argv[1],0,0);
-			if(fd>=0) {
-				int pid = sys_process_run(fd, argc - 1, &argv[1]);
-				if(pid > 0) {
-					printf("started process %d\n", pid);
-					process_yield();
-					struct process_info info;
-					process_wait_child(pid, &info, -1);
-					printf("process %d exited with status %d\n", info.pid, info.exitcode);
-					process_reap(info.pid);
-				} else {
-					printf("couldn't start %s\n", argv[1]);
-				}
-			} else {
-				printf("couldn't find %s\n",argv[1]);
-			}
-		} else {
-			printf("run: requires argument\n");
-		}
-	} else if(!strcmp(cmd, "automount")) {
-		kshell_automount();
-	} else if(!strcmp(cmd, "mount")) {
-		if(argc==4) {
-			int unit;
-			if(str2int(argv[2], &unit)) {
-				kshell_mount(argv[1],unit,argv[3]);
-			} else {
-				printf("mount: expected unit number but got %s\n", argv[2]);
-			}
-		} else {
-			printf("mount: requires device, unit, and fs type\n");
-		}
-	} else if(!strcmp(cmd, "umount")) {
-		if(current->ktable[KNO_STDDIR]) {
-			printf("unmounting root directory\n");
-			sys_object_close(KNO_STDDIR);
-		} else {
-			printf("nothing currently mounted\n");
-		}
-	} else if(!strcmp(cmd, "reap")) {
-		if(argc > 1) {
-			int pid;
-			if(str2int(argv[1], &pid)) {
-				if(process_reap(pid)) {
-					printf("reap failed!\n");
-				} else {
-					printf("process %d reaped\n", pid);
-				}
-			} else {
-				printf("reap: expected process id but got %s\n", argv[1]);
-			}
-		} else {
-			printf("reap: requires argument\n");
-		}
-	} else if(!strcmp(cmd, "kill")) {
-		if(argc > 1) {
-			int pid;
-			if(str2int(argv[1], &pid)) {
-				process_kill(pid);
-			} else {
-				printf("kill: expected process id number but got %s\n", argv[1]);
-			}
-		} else {
-			printf("kill: requires argument\n");
-		}
+    const char *cmd = argv[0];
 
-	} else if(!strcmp(cmd, "wait")) {
-		struct process_info info;
-		if(process_wait_child(0, &info, 5000) > 0) {
-			printf("process %d exited with status %d\n", info.pid, info.exitcode);
-		} else {
-			printf("wait: timeout\n");
-		}
-	} else if(!strcmp(cmd, "list")) {
-		if(argc > 1) {
-			kshell_listdir(argv[1]);
-		} else {
-			kshell_listdir(".");
-		}
+// Very detailed help function for each command
+void print_command_help(const char *command) {
+    if (!strcmp(command, "start")) {
+        printf("start <path> <args>\n");
+        printf("This command begins (or 'starts') a program right away.\n");
+        printf("It does NOT wait for the program to finish — it just runs it and lets you keep doing other things.\n");
+        printf("<path> is where the program is located. For example, /bin/hello\n");
+        printf("<args> are extra words you give to the program (optional), like settings.\n");
+        printf("Example: start /bin/hello World\n");
+        printf("Starts the 'hello' program with the word 'World' as input.\n\n");
+
+    } else if (!strcmp(command, "run")) {
+        printf("run <path> <args>\n");
+        printf("Runs a program, just like 'start', but it waits until the program finishes.\n");
+        printf("This is useful if you want to see what the program does before moving on.\n");
+        printf("At the end, it tells you the result (called an 'exit status').\n");
+        printf("Example: run /bin/update\n");
+        printf("Starts the update program, waits for it to finish, and shows the result.\n\n");
+
+    } else if (!strcmp(command, "list")) {
+        printf("list <directory>\n");
+        printf("Shows you all the files and folders in a certain location (called a directory).\n");
+        printf("f you don't give it a directory, it will show you the root (main) folder.\n");
+        printf("Example: list /home/user\n");
+        printf("Shows files inside the '/home/user' folder.\n\n");
+
+    } else if (!strcmp(command, "mount")) {
+        printf("mount <device> <unit> <fstype>\n");
+        printf("This connects (or 'mounts') a storage device (like a USB or hard drive) to the system.\n");
+        printf("<device> is the name of the hardware, like 'sda' for a hard disk.\n");
+        printf("<unit> is the number of the part (like partition 1, 2, etc).\n");
+        printf("<fstype> is the type of file system (like FAT32, EXT4, etc).\n");
+        printf("Example: mount sda 1 ext4\n");
+        printf("Mounts the first part of the 'sda' disk as an EXT4 file system.\n\n");
+
+    } else if (!strcmp(command, "kill")) {
+        printf("kill <pid>\n");
+        printf("Stops a running program by force.\n");
+        printf("<pid> is the Process ID — a number the computer gives to each running program.\n");
+        printf("You can find it by using the 'ps' or 'top' command if supported.\n");
+        printf("Example: kill 123\n");
+        printf("Stops the program with process ID 123.\n\n");
+
+    } else if (!strcmp(command, "reboot")) {
+        printf("reboot\n");
+        printf("Restarts the entire system — just like pressing the restart button.\n");
+        printf("It closes all programs and boots up fresh.\n\n");
+
+    } else if (!strcmp(command, "shutdown")) {
+        printf("shutdown\n");
+        printf("Turns off the computer completely.\n");
+        printf("Save your work before using this, as it will close everything.\n\n");
+
+    } else if (!strcmp(command, "clear")) {
+        printf("clear\n");
+        printf("Wipes everything off the screen so you get a clean console.\n");
+        printf("This doesn't delete files — it's just like clearing a whiteboard.\n\n");
+
+    } else if (!strcmp(command, "neofetch")) {
+        printf("neofetch\n");
+        printf("Shows information about your system — like its name, version, memory, and more.\n");
+        printf("Often includes a cool logo made from text!\n\n");
+
+    } else if (!strcmp(command, "startGUI")) {
+        printf("startGUI\n");
+        printf("Turns on the graphical user interface (GUI).\n");
+        printf("The GUI is the part of a computer with windows, buttons, and icons.\n");
+        printf("This lets you interact with the computer visually instead of just typing.\n\n");
+
+    } else if (!strcmp(command, "cowsay")) {
+        printf("cowsay <message>\n");
+        printf("A fun command that shows a cartoon cow saying something you type.\n");
+        printf("Example: cowsay Hello!\n");
+        printf("Shows a cow saying 'Hello!'. Just for laughs.\n\n");
+
+    } else if (!strcmp(command, "help")) {
+        printf("help [command]\n");
+        printf("If used by itself (just 'help'), it shows a list of all available commands.\n");
+        printf("If used with a command name (like 'help start'), it gives more details.\n\n");
+
+    } else {
+        printf("No detailed help available for '%s'.\n", command);
+        printf("Please check the spelling or try just typing: help\n\n");
+    }
+}
+
+
+    if (!strcmp(cmd, "start")) {
+        if (argc > 1) {
+            int fd = sys_open_file(KNO_STDDIR, argv[1], 0, 0);
+            if (fd >= 0) {
+                int pid = sys_process_run(fd, argc - 1, &argv[1]);
+                if (pid > 0) {
+                    printf("started process %d\n", pid);
+                    process_yield();
+                } else {
+                    printf("couldn't start %s\n", argv[1]);
+                }
+                sys_object_close(fd);
+            } else {
+                printf("couldn't find %s\n", argv[1]);
+            }
+        } else {
+            printf("start: requires argument.\n");
+        }
+    } else if (!strcmp(cmd, "run")) {
+        if (argc > 1) {
+            int fd = sys_open_file(KNO_STDDIR, argv[1], 0, 0);
+            if (fd >= 0) {
+                int pid = sys_process_run(fd, argc - 1, &argv[1]);
+                if (pid > 0) {
+                    printf("started process %d\n", pid);
+                    process_yield();
+                    struct process_info info;
+                    process_wait_child(pid, &info, -1);
+                    printf("process %d exited with status %d\n", info.pid, info.exitcode);
+                    process_reap(info.pid);
+                } else {
+                    printf("couldn't start %s\n", argv[1]);
+                }
+                sys_object_close(fd);
+            } else {
+                printf("couldn't find %s\n", argv[1]);
+            }
+        } else {
+            printf("run: requires argument\n");
+        }
+    } else if (!strcmp(cmd, "list")) {
+        if (argc > 1) {
+            printf("\nFiles of '%s'\n", argv[1]);
+            kshell_listdir(argv[1]);
+        } else {
+            printf("\nFiles of '/'\n");
+            kshell_listdir(".");
+        }
+    } else if (!strcmp(cmd, "mount")) {
+        if (argc == 4) {
+            int unit;
+            if (str2int(argv[2], &unit)) {
+                kshell_mount(argv[1], unit, argv[3]);
+            } else {
+                printf("mount: expected unit number but got %s\n", argv[2]);
+            }
+        } else {
+            printf("mount: requires device, unit, and fs type\n");
+        }
+    } else if (!strcmp(cmd, "kill")) {
+        if (argc > 1) {
+            int pid;
+            if (str2int(argv[1], &pid)) {
+                process_kill(pid);
+            } else {
+                printf("kill: expected process id number but got %s\n", argv[1]);
+            }
+        } else {
+            printf("kill: requires argument\n");
+        }
 	} else if(!strcmp(cmd, "mkdir")) {
 		if(argc == 3) {
 			struct fs_dirent *dir = fs_resolve(argv[1]);
@@ -288,73 +291,152 @@ static int kshell_execute(int argc, const char **argv)
 			}
 		} else {
 			printf("use: mkdir <parent-dir> <dirname>\n");
-		}
-	} else if(!strcmp(cmd, "format")) {
-		if(argc == 4) {
-			int unit;
-			if(str2int(argv[2], &unit)) {
-				struct fs *f = fs_lookup(argv[3]);
-				if(f) {
-					struct device *d = device_open(argv[1],unit);
-					if(d) {
-						fs_volume_format(f,d);
-					} else {
-						printf("couldn't open device %s unit %d\n",argv[1],unit);
-					}
-				} else {
-					printf("invalid fs type: %s\n", argv[3]);
-				}
-			} else {
-				printf("format: expected unit number but got %s\n", argv[2]);
-			}
-		}
-	} else if(!strcmp(cmd,"install")) {
-		if(argc==5) {
-			int src, dst;
-			str2int(argv[2], &src);
-			str2int(argv[4], &dst);
-			kshell_install(argv[1],src,argv[3],dst);
-		} else {
-			printf("install: expected src-device-name src-unit dest-device-name dest-unit\n");
-		}
+		} 
+} else if (!strcmp(cmd, "reboot")) {
+        reboot();
+   } else if (!strcmp(cmd, "shutdown")) {
+    if (argc > 1 && !strcmp(argv[1], "cowsay")) {
+        // User wants shutdown cowsay <message>
+        if (argc > 2) {
+            // Combine all args after "cowsay" into one message
+            int total_len = 0;
+            for (int i = 2; i < argc; i++) {
+                total_len += strlen(argv[i]) + 1; // space or terminator
+            }
 
-	} else if(!strcmp(cmd, "remove")) {
-		if(argc == 3) {
-			struct fs_dirent *dir = fs_resolve(argv[1]);
-			if(dir) {
-				int result = fs_dirent_remove(dir,argv[2]);
-				if(result<0) {
-					printf("remove: couldn't remove %s\n",argv[2]);
-				}
-				fs_dirent_close(dir);
-			} else {
-				printf("remove: couldn't open %s\n",argv[1]);
-			}
-		} else {
-			printf("use: remove <parent-dir> <filename>\n");
-		}
-	} else if(!strcmp(cmd, "time")) {
-		struct rtc_time time;
-		rtc_read(&time);
-		printf("%d-%d-%d %d:%d:%d\n", time.year, time.month, time.day, time.hour, time.minute, time.second);
-	} else if(!strcmp(cmd, "reboot")) {
-		reboot();
-	} else if(!strcmp(cmd, "bcache_stats")) {
-		struct bcache_stats stats;
-		bcache_get_stats(&stats);
-		printf("%d rhit %d rmiss %d whit %d wmiss %d wback\n",
-			stats.read_hits,stats.read_misses,
-			stats.write_hits,stats.write_misses,
-			stats.writebacks);
-	} else if(!strcmp(cmd,"bcache_flush")) {
-		bcache_flush_all();
-	} else if(!strcmp(cmd, "help")) {
-		printf("Kernel Shell Commands:\nrun <path> <args>\nstart <path> <args>\nkill <pid>\nreap <pid>\nwait\nlist\nautomount\nmount <device> <unit> <fstype>\numount\nformat <device> <unit><fstype>\ninstall atapi <srcunit> ata <dstunit>\nmkdir <path>\nremove <path>time\nbcache_stats\nbcache_flush\nreboot\nhelp\n\n");
-	} else {
-		printf("%s: command not found\n", argv[0]);
-	}
-	return 0;
+            char *msg = kmalloc(total_len);
+            if (!msg) {
+                printf("shutdown cowsay: memory allocation failed.\n");
+                return -1;
+            }
+
+            msg[0] = '\0';
+            for (int i = 2; i < argc; i++) {
+                strcat(msg, argv[i]);
+                if (i < argc - 1) strcat(msg, " ");
+            }
+
+            cowsay(msg);
+            kfree(msg);
+        } else {
+            printf("Usage: shutdown cowsay <message>\n");
+            return -1;
+        }
+    }
+    // Then proceed with shutdown normally
+    shutdown_user();
+} else if (!strcmp(cmd, "clear")) {
+        clear();
+    } else if (!strcmp(cmd, "neofetch")) {
+        neofetch();
+    } else if (!strcmp(cmd, "startGUI")) {
+        GUI();
+    } else if (!strcmp(cmd, "automount")) {
+        automount();
+} else if (!strcmp(cmd, "unmount")) {
+if (current->ktable[KNO_STDDIR]) {
+        printf("\nunmounting root directory\n");
+        sys_object_close(KNO_STDDIR);
+    } else {
+        printf("\nnothing currently mounted\n");
+    }
+} else if (!strcmp(cmd, "cowsay")) {
+    if (argc > 1) {
+        // Calculate total length for the message
+        int total_len = 0;
+        for (int i = 1; i < argc; i++) {
+            total_len += strlen(argv[i]) + 1; // +1 for space or null terminator
+        }
+
+        char *msg = kmalloc(total_len);
+        if (!msg) {
+            printf("cowsay: memory allocation failed.\n");
+            return -1;
+        }
+
+        msg[0] = '\0';
+        for (int i = 1; i < argc; i++) {
+            strcat(msg, argv[i]);
+            if (i < argc - 1) strcat(msg, " ");
+        }
+
+        cowsay(msg);
+        kfree(msg);
+    } else {
+        printf("Usage: cowsay <message>\n");
+    }
+} else if (!strcmp(cmd, "contents")) {
+    if (argc > 1) {
+        const char *filepath = argv[1];
+        printf("Reading file: %s\n", filepath);
+
+        int fd = sys_open_file(KNO_STDDIR, filepath, 0, 0);
+        if (fd < 0) {
+            printf("Failed to open file: %s\n", filepath);
+            return 0;
+        }
+
+        char *buffer = kmalloc(4096);
+        if (!buffer) {
+            printf("Memory allocation failed\n");
+            sys_object_close(fd);
+            return 0;
+        }
+
+        int bytes_read = sys_object_read(fd, buffer, 4096);
+        if (bytes_read > 0) {
+            buffer[bytes_read] = '\0';
+            printf("\f%s\n", buffer);  // Clear screen before showing contents
+        } else {
+            printf("File read failed or is empty\n");
+        }
+
+        kfree(buffer);
+        sys_object_close(fd);
+
+        __asm__ __volatile__ (
+            "mov $100000000, %%ecx\n"
+            "1:\n"
+            "dec %%ecx\n"
+            "jnz 1b\n"
+            :
+            :
+            : "ecx"
+        );
+    } else {
+        printf("Usage: contents <filepath>\n");
+    } 
+} else if (!strcmp(cmd, "help")) {
+           if (argc == 1) {
+        printf("\nCommands:\n");
+        printf("start <path> <args>\n");
+        printf("run <path> <args>\n");
+        printf("list <directory>\n");
+        printf("mount <device> <unit> <fstype>\n");
+        printf("kill <pid>\n");
+        printf("reboot\n");
+        printf("shutdown\n");
+        printf("clear\n");
+        printf("neofetch\n");
+        printf("startGUI\n");
+        printf("automount\n");
+        printf("unmount\n");
+        printf("help <command>\n");
+        printf("contents <file>");
+        printf("cowsay\n\n");
+} else if (argc == 2) {
+            print_command_help(argv[1]);
+        } else {
+            printf("Usage: help [command]\n");
+        }
+    } else {
+        printf("%s: command not found                                                                       :(\n", argv[0]);
+    }
+
+    return 0;
 }
+
+
 
 int kshell_readline(char *line, int length)
 {
@@ -380,15 +462,224 @@ int kshell_readline(char *line, int length)
 	return 0;
 }
 
+void cowsay(const char *message) {
+    int len = strlen(message);
+    int i;
+
+    // Top of bubble
+    printf(" ");
+    for (i = 0; i < len + 2; i++) printf("_");
+    printf("\n");
+
+    // Bubble with message
+    printf("< %s >\n", message);
+
+    // Bottom of bubble
+    printf(" ");
+    for (i = 0; i < len + 2; i++) printf("-");
+    printf("\n");
+
+    // Cow ASCII art
+    printf("        \\   ^__^\n");
+    printf("         \\  (oo)\\_______\n");
+    printf("            (__)\\       )\\/\\\n");
+    printf("                ||----w |\n");
+    printf("                ||     ||\n");
+}
+
+
+////////////////////////////////////////////////////////////
+// everything past this point is for system interactions //
+//////////////////////////////////////////////////////////
+
+
+int automount()
+{
+	int i;
+
+	for(i=0;i<4;i++) {
+		printf("automount: trying atapi unit %d.\n",i);
+		if(kshell_mount("atapi",i,"cdromfs")==0) return 0;
+	}
+
+	for(i=0;i<4;i++) {
+		printf("automount: trying ata unit %d.\n",i);
+		if(kshell_mount("ata",i,"simplefs")==0) return 0;
+	}
+
+	printf("automount: no bootable devices available.\n");
+	return -1;
+}
+
+void shutdown_user() {
+    clear();
+    // main message for shutdown
+    printf("Powering off... ");
+    // inside this will be containing all of the background processes of shutting down
+    // that will consist of stopping all the background processes, unmounting disk and rootfs
+    // as well as then running the acpi command to poweroff the cpu
+    // if the computer cant be shutdown using the acpi it warns the user and halts the system for it to force powered off
+
+   // first process is to kill them all as well as the children
+    for (int pid = 2; pid <= 100; pid++) {
+        process_kill(pid);
+        if ((pid - 1) % 10 == 0) {
+        }
+    }
+
+   // unmount the disk and root file system
+if (current->ktable[KNO_STDDIR]) {
+        sys_object_close(KNO_STDDIR);
+    } else {
+    }
+
+
+    // wait to show the user it had been proceesing stuff
+        __asm__ __volatile__ (
+        "mov $400000000, %%ecx\n"
+        "1:\n"
+        "dec %%ecx\n"
+        "jnz 1b\n"
+        :
+        :
+        : "ecx"
+    );
+
+// print that it was successful of shutting it down just before the acpi
+printf("Done\n");
+
+    // wait to make it smooth instead of the rush
+        __asm__ __volatile__ (
+        "mov $400000000, %%ecx\n"
+        "1:\n"
+        "dec %%ecx\n"
+        "jnz 1b\n"
+        :
+        :
+        : "ecx"
+    );
+
+
+    // acpi command to poweroff the cpu
+    __asm__ __volatile__ (
+        "mov $0x604, %%dx\n\t"
+        "mov $0x2000, %%ax\n\t"
+        "out %%ax, %%dx\n\t"
+        :
+        :
+        : "ax", "dx"
+    );
+
+// make the user force poweroff the system if it can be turned off by the acpi
+// display the warning message and then halt the cpu
+
+    clear();
+    printf("System halted.\n");
+    printf("The system could not be shut down via ACPI.\n");
+
+    halt();
+}
+
+int GUI() {
+    printf("\nThe GUI is being loaded, please wait during this time, as it may take a while\n");
+
+    // Simple delay loop for realism
+    __asm__ __volatile__ (
+        "mov $400000000, %%ecx\n"
+        "1:\n"
+        "dec %%ecx\n"
+        "jnz 1b\n"
+        :
+        :
+        : "ecx"
+    );
+
+    // Try to open the GUI file
+    int fd = sys_open_file(KNO_STDDIR, "/core/gui/main.nex", 0, 0);
+    if (fd < 0) {
+        printf("GUI: Failed to open core/gui/main.nex\n");
+        return -1;
+    }
+
+    // Read contents into a buffer
+    char *buffer = kmalloc(4096);  // Allocate 4KB for GUI data
+    if (!buffer) {
+        printf("GUI: Memory allocation failed\n");
+        sys_object_close(fd);
+        return -1;
+    }
+
+    int bytes_read = sys_object_read(fd, buffer, 4096);
+    if (bytes_read > 0) {
+        buffer[bytes_read] = '\0'; // Null-terminate
+        printf("\f%s\n", buffer);
+    } else {
+        printf("GUI: File read failed or is empty\n");
+    }
+
+    // Cleanup
+    kfree(buffer);
+    sys_object_close(fd);
+
+
+    // Simple delay loop for realism
+    __asm__ __volatile__ (
+        "mov $400000000, %%ecx\n"
+        "1:\n"
+        "dec %%ecx\n"
+        "jnz 1b\n"
+        :
+        :
+        : "ecx"
+    );
+
+    return 0;
+
+}
+
+
+void neofetch() {
+    const char *architecture = "x86";
+    const char *shell = "Kshell";
+
+    printf("\n");
+    printf("|----------------------------------------------------------|\n");
+    printf("|                     NexShell v1.2.3                      |\n");
+    printf("|                  (C)Copyright 2025 XPDevs                |\n");
+    printf("|                  Build id: NS127-0425-S1                 |\n");
+    printf("|----------------------------------------------------------|\n");
+    printf("| Architecture: %s\n", architecture);
+    printf("| Shell: %s\n", shell);
+    printf("| video: %d x %d\n", video_xres, video_yres, video_buffer);
+    printf("|----------------------------------------------------------|\n\n");
+}
+
+void clear() {
+printf("\f\n");
+}
+
 
 int kshell_launch()
 {
 	char line[1024];
 	const char *argv[100];
 	int argc;
+// everything past here for control
+
+printf("acpi: Installed for shutdown\n\n");
+
+    // Try to mount the root filesystem
+    printf("Mounting root filesystem\n");
+
+automount();
+neofetch(); // print system info
+
+// go straight into the GUI but command line if it has any errors
+GUI();
 
 	while(1) {
-		printf("kshell> ");
+               printf("\n");
+		printf("root@Doors: /core/NexShell# ");
 		kshell_readline(line, sizeof(line));
 
 		argc = 0;
@@ -402,6 +693,5 @@ int kshell_launch()
 			kshell_execute(argc, argv);
 		}
 	}
-
 	return 0;
 }
