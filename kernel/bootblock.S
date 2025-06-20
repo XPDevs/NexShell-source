@@ -1,12 +1,10 @@
 # -----------------------------------------------------------------------------
-# DoorsOS NexShell Bootloader
+# DoorsOS NexShell Bootloader 
 # -----------------------------------------------------------------------------
 # Copyright (C) 2015 The University of Notre Dame
 # Modified by XPDevs (2025) for DoorsOS / NexShell integration
 # Licensed under GNU GPL v2 or later.
 # -----------------------------------------------------------------------------
-
-#include "memorylayout.h"
 
 .code16
 .text
@@ -17,19 +15,22 @@
 # -----------------------------------------------------------------------------
 
 _start:
-    ljmp    $BOOTBLOCK_SEGMENT, $_start2
+    ljmp    $0x07c0, $_start2  # BOOTBLOCK_SEGMENT = 0x07c0
 
 _start2:
-    sti                               # Enable interrupts
-    cld                               # Clear direction flag
+    sti
+    cld
 
     # Set up segment registers
     mov     %cs, %ax
     mov     %ax, %ds
     mov     %ax, %es
-    mov     $INTERRUPT_STACK_SEGMENT, %ax
+    mov     $0x0000, %ax       # INTERRUPT_STACK_SEGMENT = 0x0000
     mov     %ax, %ss
-    mov     $INTERRUPT_STACK_OFFSET, %sp
+    mov     $0xfff0, %sp       # INTERRUPT_STACK_OFFSET = 0xfff0
+
+    # Clear screen and set text mode
+    call    clear_screen
 
     # Save boot disk and partition table info
     mov     %dl, (disk_number)
@@ -45,7 +46,7 @@ _start2:
     mov     $0, %ah
     int     $0x13
 
-    # Get disk geometry (heads, sectors, cylinders)
+    # Get disk geometry
     mov     $0x08, %ah
     int     $0x13
     and     $0x3f, %cl
@@ -53,33 +54,34 @@ _start2:
     mov     %ch, (disk_cylinders)
     mov     %dh, (disk_heads)
 
-    # Prepare to load the kernel
-    mov     $KERNEL_SEGMENT, %ax
+    # Prepare for loading kernel
+    mov     $0x1000, %ax       # KERNEL_SEGMENT = 0x1000
     mov     %ax, %es
-    mov     $KERNEL_OFFSET, %bx
+    mov     $0x0000, %bx       # KERNEL_OFFSET = 0x0000
     mov     (disk_number), %dl
     xor     %ch, %ch
     xor     %dh, %dh
-    mov     $2, %cl                   # Start loading from sector 2
+    mov     $2, %cl
 
 # -----------------------------------------------------------------------------
-# Kernel Loading Loop
+# Kernel Loading Loop (With Slow Spinner)
 # -----------------------------------------------------------------------------
 
 loadsector:
-    mov     $1, %al                   # Read 1 sector
+    mov     $1, %al
     mov     $0x02, %ah
     int     $0x13
+    jc     load_error     # jmp for debug jc for real
 
-    # Print progress indicator
+    # Show progress slowly
     mov     $'.', %al
     call    bios_putchar
+    call    dot_delay
 
-    # Determine sectors remaining
     mov     (sectors_left), %ax
     cmp     $0xffff, %ax
     jne     gotsectors
-    mov     %es:(KERNEL_SIZE_OFFSET), %eax
+    mov     %es:20, %eax       # KERNEL_SIZE_OFFSET = 20
     shr     $9, %eax
     inc     %eax
 
@@ -116,7 +118,7 @@ nextsector:
     jle     loadsector
 
 # -----------------------------------------------------------------------------
-# Kernel Loaded – Transfer Control
+# Boot
 # -----------------------------------------------------------------------------
 
 loaddone:
@@ -126,22 +128,74 @@ loaddone:
     mov     $(bootmsg), %si
     call    bios_putstring
 
-    mov     $KERNEL_SEGMENT, %ax
+    call    set_video_mode
+
+    mov     $0x1000, %ax       # KERNEL_SEGMENT = 0x1000
     mov     %ax, %ds
-    ljmp    $KERNEL_SEGMENT, $KERNEL_OFFSET
+    ljmp    $0x1000, $0x0000   # KERNEL_SEGMENT:KERNEL_OFFSET
+
+# -----------------------------------------------------------------------------
+# Error Handling
+# -----------------------------------------------------------------------------
+
+load_error:
+    mov     $(errormsg), %si
+    call    bios_putstring
+
+ask_reboot:
+    mov     $(rebootmsg), %si
+    call    bios_putstring
+
+wait_key:
+    call    bios_getkey
+    cmpb    $0, %al
+    je      wait_key
+
+    cmpb    $'Y', %al
+    je      reboot_system
+    cmpb    $'y', %al
+    je      reboot_system
+    cmpb    $'N', %al
+    je      halt_loop
+    cmpb    $'n', %al
+    je      halt_loop
+    jmp     wait_key
+
+reboot_system:
+    mov     $0, %ax
+    int     $0x19
+
+halt_loop:
+    hlt
+    jmp     halt_loop
+
+# -----------------------------------------------------------------------------
+# Video Mode
+# -----------------------------------------------------------------------------
+
+set_video_mode:
+    mov     $0x4F02, %ax
+    mov     $0x101, %bx
+    int     $0x10
+    jc      set_text_mode
+    ret
+
+set_text_mode:
+    mov     $0x00, %ah
+    mov     $0x03, %al
+    int     $0x10
+    ret
 
 # -----------------------------------------------------------------------------
 # BIOS Utility Functions
 # -----------------------------------------------------------------------------
 
-# Reset to 80x25 text mode
 clear_screen:
     mov     $0x00, %ah
     mov     $0x03, %al
     int     $0x10
     ret
 
-# Print string from address in SI
 bios_putstring:
     mov     (%si), %al
     cmp     $0, %al
@@ -152,7 +206,6 @@ bios_putstring:
 bios_putstring_done:
     ret
 
-# Print character in AL
 bios_putchar:
     push    %ax
     push    %bx
@@ -163,6 +216,23 @@ bios_putchar:
     pop     %ax
     ret
 
+bios_getkey:
+    mov     $0x00, %ah
+    int     $0x16
+    ret
+
+# -----------------------------------------------------------------------------
+# Simple Delay (dot spinner)
+# -----------------------------------------------------------------------------
+
+dot_delay:
+    push    %cx
+    mov     $0xFFFF, %cx
+.delay_loop:
+    loop    .delay_loop
+    pop     %cx
+    ret
+
 # -----------------------------------------------------------------------------
 # System Messages
 # -----------------------------------------------------------------------------
@@ -171,10 +241,16 @@ loadmsg:
     .asciz "[SYSTEM] Loading NexShell!"
 
 bootmsg:
-    .asciz "\n[SYSTEM] Booting NexShell!\n"
+    .asciz "\r\n[SYSTEM] Booting NexShell!"
+
+errormsg:
+    .asciz "\r\n[SYSTEM ERROR] Failed to load NexShell. Halting."
+
+rebootmsg:
+    .asciz "\r\nDo you want to reboot? (Y/N):\n"
 
 # -----------------------------------------------------------------------------
-# BIOS Disk Information
+# BIOS Disk Info
 # -----------------------------------------------------------------------------
 
 disk_number:        .byte 0
@@ -183,7 +259,6 @@ disk_heads:         .byte 0
 disk_sectors:       .byte 0
 sectors_left:       .word 0xffff
 
-# Optional MBR Partition Info
 partition_status:       .byte 0
 partition_start_chs:    .byte 0, 0, 0
 partition_type:         .byte 0
@@ -197,4 +272,4 @@ partition_length:       .long 0
 
 .org 510
 bootflag:
-    .word 0xAA55              # Bootable signature
+    .word 0xAA55
